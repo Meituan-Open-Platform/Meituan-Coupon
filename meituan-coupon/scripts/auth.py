@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-meituan-coupon-get-tool 内嵌认证模块 v1.0.3
-基于 meituan-c-user-auth v1.0.3 内嵌，用户无需单独安装 meituan-c-user-auth。
+meituan-coupon-get-tool 内嵌认证模块 v1.0.4
+基于 meituan-c-user-auth v1.0.4 内嵌，用户无需单独安装 meituan-c-user-auth。
 对接 EDS Claw 短信登录接口，管理 user_token 与 device_token。
 
 接口文档：https://km.sankuai.com/collabpage/2752893495（新版）
@@ -13,6 +13,7 @@ meituan-coupon-get-tool 内嵌认证模块 v1.0.3
   python auth.py send-sms --phone 13812345678
   python auth.py verify --phone 13812345678 --code 123456
   python auth.py logout
+  python auth.py clear-device-token
 """
 
 import argparse
@@ -21,22 +22,16 @@ import json
 import random
 import sys
 import time
-import warnings
 from pathlib import Path
-
-# 屏蔽 httpx/urllib3 的 SSL 不验证警告，避免污染 JSON stdout 输出
-warnings.filterwarnings("ignore", message=".*ssl.*", category=UserWarning)
-try:
-    import urllib3
-    urllib3.disable_warnings()
-except ImportError:
-    pass
 
 # ── 常量 ──────────────────────────────────────────────────────────────
 # 内嵌于 meituan-coupon-get-tool，Token 存储 key 与外部 meituan-c-user-auth 共享，
 # 实现"一次登录、两个 Skill 共用 Token"，用户安装任一 Skill 登录后均可复用。
 AUTH_KEY       = "meituan-c-user-auth"
-LOCAL_VERSION  = "1.0.3"   # 内嵌版本号，与 SKILL.md 中 version 字段保持一致
+LOCAL_VERSION  = "1.0.6"   # 内嵌版本号，与 SKILL.md 中 version 字段保持一致
+
+# 用户协议接受状态字段名
+TERMS_ACCEPTED_KEY = "terms_accepted"
 
 # Skill 公开主页（clawhub.ai，外网可访问）
 SKILL_PAGE_URL = "https://clawhub.ai/meituan-zhengchang/meituan-coupon-get-tool"
@@ -151,9 +146,15 @@ def load_auth() -> dict:
 
 
 def save_auth(data: dict):
+    import os, stat
     AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
     with open(AUTH_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
+    # 仅当前用户可读写（0600），防止其他用户读取 Token
+    try:
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass  # Windows 不支持 chmod，静默跳过
 
 
 def get_token_data() -> dict:
@@ -177,6 +178,25 @@ def logout_token_data():
     entry["user_token"] = ""          # 置空，表示已退出登录
     auth[AUTH_KEY] = entry
     save_auth(auth)
+
+
+def get_terms_accepted() -> bool:
+    """
+    获取用户是否接受服务协议的状态。
+    返回 True 表示已接受，False 表示未接受或状态不存在。
+    """
+    token_data = get_token_data()
+    return token_data.get(TERMS_ACCEPTED_KEY, False)
+
+
+def set_terms_accepted(accepted: bool):
+    """
+    设置用户服务协议接受状态。
+    accepted: True 表示接受，False 表示不接受。
+    """
+    token_data = get_token_data()
+    token_data[TERMS_ACCEPTED_KEY] = accepted
+    save_token_data(token_data)
 
 
 # ── 命令：status（本地检查，不调用接口）────────────────────────────────
@@ -245,7 +265,7 @@ def cmd_token_verify():
             params={"token": user_token},
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         code = resp_data.get("code")
@@ -325,7 +345,7 @@ def cmd_send_sms(phone: str):
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         code = resp_data.get("code")
@@ -453,7 +473,7 @@ def cmd_verify(phone: str, code: str):
             json=body,
             headers={"Content-Type": "application/json"},
             timeout=10,
-            verify=False
+            verify=True
         )
         resp_data = resp.json()
         resp_code = resp_data.get("code")
@@ -553,6 +573,74 @@ def cmd_logout():
     print(json.dumps(result, ensure_ascii=False))
 
 
+# ── 命令：terms-check / terms-accept / terms-decline ──────────────────
+
+def cmd_terms_check():
+    """检查用户是否已接受服务协议"""
+    accepted = get_terms_accepted()
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": accepted,
+        "message": "用户已接受服务协议" if accepted else "用户尚未接受服务协议"
+    }, ensure_ascii=False))
+
+
+def cmd_terms_accept():
+    """用户接受服务协议"""
+    set_terms_accepted(True)
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": True,
+        "message": "已接受服务协议，可以继续使用"
+    }, ensure_ascii=False))
+
+
+def cmd_terms_decline():
+    """用户拒绝服务协议"""
+    set_terms_accepted(False)
+    # 同时清除登录状态
+    logout_token_data()
+    print(json.dumps({
+        "success": True,
+        "terms_accepted": False,
+        "message": "已拒绝服务协议，无法继续使用相关功能"
+    }, ensure_ascii=False))
+
+
+# ── 命令：clear-device-token ──────────────────────────────────────────
+
+def cmd_clear_device_token():
+    """清除设备标识（device_token），同时清除 user_token 和 phone_masked。
+    仅在用户明确输入「清除设备标识」时调用，退出登录不触发此操作。
+    """
+    import os, stat
+    auth = load_auth()
+    entry = auth.get(AUTH_KEY, {})
+
+    had_device_token = bool(entry.get("device_token"))
+
+    # 清除所有认证相关字段
+    entry["user_token"] = ""
+    entry["device_token"] = ""
+    entry["phone_masked"] = ""
+    auth[AUTH_KEY] = entry
+
+    AUTH_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with open(AUTH_FILE, "w", encoding="utf-8") as f:
+        json.dump(auth, f, ensure_ascii=False, indent=2)
+    try:
+        os.chmod(AUTH_FILE, stat.S_IRUSR | stat.S_IWUSR)
+    except OSError:
+        pass
+
+    result = {
+        "success": True,
+        "message": "设备标识已清除，下次登录将生成新的 device_token",
+        "device_token_cleared": had_device_token
+    }
+    print(json.dumps(result, ensure_ascii=False))
+
+
 # ── 入口 ──────────────────────────────────────────────────────────────
 
 def main():
@@ -579,7 +667,19 @@ def main():
     p_verify.add_argument("--code", required=True, help="6位短信验证码")
 
     # logout
-    subparsers.add_parser("logout", help="退出登录，清除 user_token")
+    subparsers.add_parser("logout", help="退出登录，清除 user_token（保留 device_token）")
+
+    # terms-check - 检查协议状态
+    subparsers.add_parser("terms-check", help="检查用户是否已接受服务协议")
+
+    # terms-accept - 接受协议
+    subparsers.add_parser("terms-accept", help="接受服务协议")
+
+    # terms-decline - 拒绝协议
+    subparsers.add_parser("terms-decline", help="拒绝服务协议")
+
+    # clear-device-token
+    subparsers.add_parser("clear-device-token", help="清除设备标识（device_token），仅在用户明确要求时调用")
 
     args = parser.parse_args()
 
@@ -595,6 +695,14 @@ def main():
         cmd_verify(args.phone, args.code)
     elif args.command == "logout":
         cmd_logout()
+    elif args.command == "terms-check":
+        cmd_terms_check()
+    elif args.command == "terms-accept":
+        cmd_terms_accept()
+    elif args.command == "terms-decline":
+        cmd_terms_decline()
+    elif args.command == "clear-device-token":
+        cmd_clear_device_token()
 
 
 if __name__ == "__main__":
