@@ -9,25 +9,11 @@
 - **一键领券**：通过自然语言指令，自动为你的美团账号发放优惠券
 - **历史查询**：查询指定日期或日期区间内的历史领券记录
 - **内置认证**：无需额外安装其他 Skill，内置美团账号短信验证码登录流程
-- **多平台支持**：兼容 macOS、Windows（Git Bash）、Linux 及其他 Agent 环境
+- **自动领券**：设置定时任务，让Agent帮你每日定时领取优惠
 
 ---
 
 ## 🚀 快速开始
-
-### 安装
-
-将本仓库克隆到你的 Skill 目录：
-
-```bash
-# macOS / Linux
-git clone https://github.com/<your-org>/meituan-coupon \
-  ~/.claude/skills/meituan-coupon-get-tool
-
-# 或使用自定义 Skill 目录
-git clone https://github.com/<your-org>/meituan-coupon \
-  $CLAUDE_CONFIG_DIR/skills/meituan-coupon-get-tool
-```
 
 ### 触发词
 
